@@ -35,6 +35,10 @@ final class ChatViewModel {
             // 每次设新错误时，3 秒后自动清空（用户也可以手动点 toast 上的 ×）
             errorAutoDismissTask?.cancel()
             guard let msg = errorMessage, !msg.isEmpty else { return }
+            // 错误音 —— 只在出新错误时响，避免同样错误连续 set 重复轰炸
+            if oldValue != msg {
+                SoundManager.play(.error)
+            }
             errorAutoDismissTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: 3_500_000_000)
                 if !Task.isCancelled, self?.errorMessage == msg {
@@ -142,6 +146,13 @@ final class ChatViewModel {
             }
             guard conversations[idx].mode != newValue else { return }
             conversations[idx].mode = newValue
+            // 新对话还没发 user 消息时，welcome message 的 mode label 跟着切（避免发完第一条消息后
+            // 看见"👋 这是一个新对话（旧 mode）"残留，字面跟当前 mode 冲突）
+            if !conversations[idx].hasUserMessages,
+               conversations[idx].messages.count == 1,
+               conversations[idx].messages[0].role == .assistant {
+                conversations[idx].messages[0].content = Self.welcomeMessageContent(for: newValue)
+            }
             lastUsedMode = newValue
             // 通知灵动岛左耳 / Clawd 等：当前对话的 mode 变了
             NotificationCenter.default.post(
@@ -151,6 +162,19 @@ final class ChatViewModel {
             )
             storage.saveConversations(conversations)
             checkConnection()
+        }
+    }
+    /// 聊天窗"始终置顶"开关 —— 默认 true（老行为，浮在所有 app 上）。
+    /// 关掉 → window.level = .normal，跟普通窗口一样会被其他 app 挡住。
+    /// 持久化 + 发通知给 ChatWindowController 切 window.level，Key 跟 ChatWindowController 共用同一个常量
+    var chatWindowAlwaysOnTop: Bool {
+        didSet {
+            UserDefaults.standard.set(chatWindowAlwaysOnTop, forKey: kChatWindowAlwaysOnTopKey)
+            NotificationCenter.default.post(
+                name: .hermesPetChatWindowPinChanged,
+                object: nil,
+                userInfo: ["pinned": chatWindowAlwaysOnTop]
+            )
         }
     }
     /// 桌宠"安静模式" —— 关闭呼吸 / 眨眼 / 完成跳跃等生命感动画。
@@ -260,13 +284,24 @@ final class ChatViewModel {
     /// 开机自启状态（SMAppService 同步）
     var isLaunchAtLoginOn: Bool = false
 
-    /// 按住 Cmd+Shift+V 启动语音时播放的系统音效名（空 = 静音）
+    /// 5 个提示音事件 —— 详见 `SoundEvent`。值可能是：
+    /// - 空字符串 = 关闭（不响）
+    /// - 系统音名（如 "Glass" / "Pop"）= macOS 内置音
+    /// - 以 `/` 开头的绝对路径 = 用户拖入的自定义音频文件
     var voiceStartSound: String {
-        didSet { UserDefaults.standard.set(voiceStartSound, forKey: "voiceStartSound") }
+        didSet { UserDefaults.standard.set(voiceStartSound, forKey: SoundEvent.voiceStart.defaultsKey) }
     }
-    /// AI 任务成功完成时播放的系统音效名（空 = 静音）
     var voiceFinishSound: String {
-        didSet { UserDefaults.standard.set(voiceFinishSound, forKey: "voiceFinishSound") }
+        didSet { UserDefaults.standard.set(voiceFinishSound, forKey: SoundEvent.voiceFinish.defaultsKey) }
+    }
+    var dragInSound: String {
+        didSet { UserDefaults.standard.set(dragInSound, forKey: SoundEvent.dragIn.defaultsKey) }
+    }
+    var sendSound: String {
+        didSet { UserDefaults.standard.set(sendSound, forKey: SoundEvent.send.defaultsKey) }
+    }
+    var errorSound: String {
+        didSet { UserDefaults.standard.set(errorSound, forKey: SoundEvent.error.defaultsKey) }
     }
 
     /// 待发送的图片附件（粘贴 / 拖拽 / 截屏都进这里）
@@ -287,6 +322,12 @@ final class ChatViewModel {
 
     static func directAPIKeyStorageKey(providerID: String) -> String {
         "directAPIKey.\(providerID)"
+    }
+
+    /// 新对话的 welcome message 文本模板 —— newConversation 跟 agentMode setter 都用它，
+    /// 保证用户在新对话状态下切 mode 时，welcome message 的 mode label 跟实际 mode 同步
+    static func welcomeMessageContent(for mode: AgentMode) -> String {
+        "👋 这是一个新对话（\(mode.label)），开始聊天吧～"
     }
 
     init() {
@@ -310,8 +351,13 @@ final class ChatViewModel {
         // directAPI 配上 API Key 就能立刻用。老用户的 agentMode UserDefaults 还在，不受影响
         self.lastUsedMode = AgentMode(rawValue: savedMode ?? "") ?? .directAPI
         self.isLaunchAtLoginOn = SMAppService.mainApp.status == .enabled
-        self.voiceStartSound  = UserDefaults.standard.string(forKey: "voiceStartSound")  ?? "Funk"
-        self.voiceFinishSound = UserDefaults.standard.string(forKey: "voiceFinishSound") ?? "Glass"
+        self.voiceStartSound  = UserDefaults.standard.string(forKey: SoundEvent.voiceStart.defaultsKey)  ?? SoundEvent.voiceStart.fallbackValue
+        self.voiceFinishSound = UserDefaults.standard.string(forKey: SoundEvent.voiceFinish.defaultsKey) ?? SoundEvent.voiceFinish.fallbackValue
+        self.dragInSound      = UserDefaults.standard.string(forKey: SoundEvent.dragIn.defaultsKey)      ?? SoundEvent.dragIn.fallbackValue
+        self.sendSound        = UserDefaults.standard.string(forKey: SoundEvent.send.defaultsKey)        ?? SoundEvent.send.fallbackValue
+        self.errorSound       = UserDefaults.standard.string(forKey: SoundEvent.error.defaultsKey)       ?? SoundEvent.error.fallbackValue
+        // chatWindowAlwaysOnTop 默认 true —— 保持老用户行为（聊天窗本来就是浮窗 .floating）
+        self.chatWindowAlwaysOnTop = (UserDefaults.standard.object(forKey: kChatWindowAlwaysOnTopKey) as? Bool) ?? true
         self.quietMode = UserDefaults.standard.bool(forKey: "quietMode")
         // hapticEnabled 默认 true（无值时 object(forKey:) → nil → ?? true）
         self.hapticEnabled = (UserDefaults.standard.object(forKey: "hapticEnabled") as? Bool) ?? true
@@ -579,6 +625,10 @@ final class ChatViewModel {
 
         inputText = ""
         errorMessage = nil
+
+        // 发送音 —— 所有 guard 通过、清空输入之后才响，避免被拒/连接断开时也响
+        SoundManager.play(.send)
+
         // 把当前激活对话标记为 streaming（每个对话独立 loading 状态）
         let targetConvIdx = conversations.firstIndex(where: { $0.id == activeConversationID })
         if let idx = targetConvIdx {
@@ -1238,7 +1288,7 @@ final class ChatViewModel {
             title: "对话 \(n)",
             messages: [ChatMessage(
                 role: .assistant,
-                content: "👋 这是一个新对话（\(resolved.label)），开始聊天吧～"
+                content: Self.welcomeMessageContent(for: resolved)
             )],
             mode: resolved
         )
@@ -1847,6 +1897,8 @@ final class ChatViewModel {
         if pendingDocuments.contains(url) { return }
         pendingDocuments.append(url)
 
+        SoundManager.play(.dragIn)
+
         // 灵动岛弹 toast 提示附加成功
         NotificationCenter.default.post(
             name: .init("HermesPetScreenshotAdded"),
@@ -1867,6 +1919,7 @@ final class ChatViewModel {
     /// 把粘贴板/拖拽来的图片加入待发送队列
     func addPendingImage(_ data: Data) {
         pendingImages.append(data)
+        SoundManager.play(.dragIn)
     }
 
     func removePendingImage(at index: Int) {

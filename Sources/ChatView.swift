@@ -189,15 +189,6 @@ struct ChatView: View {
 
             Spacer()
 
-            // 连接状态点（connected 时呼吸）
-            ConnectionDot(
-                color: connectionDotColor,
-                isPulsing: viewModel.connectionStatus.isConnected
-            )
-            // mode 切换时颜色平滑过渡
-            .animation(AnimTok.smooth, value: viewModel.agentMode)
-            .padding(.horizontal, 6)
-
             HeaderIconButton(systemName: "camera.viewfinder", help: "截屏并附加（隐藏窗口截全屏）") {
                 viewModel.captureScreenAndAttach { hide, done in
                     if let win = NSApp.keyWindow ?? NSApp.windows.first(where: { $0.isVisible }) {
@@ -208,10 +199,14 @@ struct ChatView: View {
                 }
             }
 
-            HeaderIconButton(systemName: "pin", help: "导出全部 Pin 为 Markdown") {
-                PinCardController.shared.exportAllPinsToMarkdown()
+            HeaderToggleButton(
+                isOn: viewModel.chatWindowAlwaysOnTop,
+                systemNameOn: "pin.fill",
+                systemNameOff: "pin.slash",
+                help: viewModel.chatWindowAlwaysOnTop ? "取消置顶（窗口可被其他 app 盖住）" : "始终置顶（窗口浮在所有 app 之上）"
+            ) {
+                viewModel.chatWindowAlwaysOnTop.toggle()
             }
-            .disabled(PinStore.shared.pins.isEmpty)
 
             HeaderIconButton(systemName: "gearshape.fill", help: "设置") {
                 viewModel.showSettings.toggle()
@@ -221,16 +216,8 @@ struct ChatView: View {
                 SettingsView(viewModel: viewModel)
             }
 
-            HeaderIconButton(systemName: "square.and.arrow.up", help: "导出对话为 Markdown") {
-                viewModel.exportChatToMarkdown()
-            }
-
             HeaderIconButton(systemName: "trash", help: "清空当前对话") {
                 showClearConfirm = true
-            }
-
-            HeaderIconButton(systemName: "doc.on.doc", help: "复制最后一条回复") {
-                viewModel.copyLastResponse()
             }
         }
         .padding(.horizontal, 12)
@@ -405,7 +392,9 @@ struct ChatView: View {
                 }
                 .onChange(of: viewModel.messages.last?.content.count) { _, _ in
                     if viewModel.messages.last?.isStreaming == true, isMessagesNearBottom {
-                        scrollToBottom(proxy)
+                        // 流式期间用 instant scroll：每个 token 都跑 spring 动画会互相打断
+                        // → bubble 高度变化 + 没收敛的 scroll 一起 → 视觉颤抖
+                        scrollToBottom(proxy, animated: false)
                     }
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetScrollToMessage"))) { note in
@@ -1018,6 +1007,35 @@ struct HeaderIconButton: View {
         Button(action: action) {
             Image(systemName: systemName)
                 .foregroundStyle(.secondary)
+                .frame(width: 22, height: 22)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(.primary.opacity(isHovering ? 0.08 : 0))
+                )
+        }
+        .buttonStyle(.plain)
+        .help(help)
+        .onHover { hovering in
+            withAnimation(AnimTok.snappy) { isHovering = hovering }
+        }
+    }
+}
+
+/// 二态切换按钮（pin 置顶 / 取消置顶）。
+/// on 态用蓝色 + 实心图标提示当前生效，off 态走 .secondary 灰色，跟其他 header 按钮一致
+struct HeaderToggleButton: View {
+    let isOn: Bool
+    let systemNameOn: String
+    let systemNameOff: String
+    let help: String
+    let action: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: isOn ? systemNameOn : systemNameOff)
+                .foregroundStyle(isOn ? Color.accentColor : Color.secondary)
                 .frame(width: 22, height: 22)
                 .background(
                     RoundedRectangle(cornerRadius: 5)

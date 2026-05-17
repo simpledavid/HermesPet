@@ -4,7 +4,12 @@ import SwiftUI
 extension Notification.Name {
     /// ChatWindow 调 show()，通知 ChatView 强制 scrollToBottom（恢复用户期望的"看最新消息"位置）
     static let hermesPetChatWindowShown = Notification.Name("HermesPetChatWindowShown")
+    /// 聊天窗"始终置顶"开关变化 —— userInfo["pinned"] = Bool
+    static let hermesPetChatWindowPinChanged = Notification.Name("HermesPetChatWindowPinChanged")
 }
+
+/// 聊天窗"始终置顶" UserDefaults key —— ChatWindowController init 跟 ChatViewModel 用同一个 key
+let kChatWindowAlwaysOnTopKey = "chatWindowAlwaysOnTop"
 
 /// 聊天窗口控制器：用 NSWindow 替代 NSPopover，
 /// 显示/隐藏时从灵动岛位置「展开/收回」动画，
@@ -36,7 +41,9 @@ final class ChatWindowController: NSObject, NSWindowDelegate {
         window.titlebarAppearsTransparent = true
         window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
-        window.level = HermesWindowLevel.chat   // 见 WindowLevels.swift 规范
+        // 用户可在 header 切"始终置顶"。默认 true 保持老行为（聊天窗永远 .floating 不被其他 app 盖）
+        let pinned = (UserDefaults.standard.object(forKey: kChatWindowAlwaysOnTopKey) as? Bool) ?? true
+        window.level = pinned ? HermesWindowLevel.chat : .normal   // 见 WindowLevels.swift 规范
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.contentMinSize = NSSize(width: 360, height: 360)
         window.contentMaxSize = NSSize(width: 1400, height: 1600)
@@ -58,6 +65,19 @@ final class ChatWindowController: NSObject, NSWindowDelegate {
         self.window = window
         super.init()
         window.delegate = self
+
+        // 监听用户在 header 切 pin 图标
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handlePinChanged(_:)),
+            name: .hermesPetChatWindowPinChanged,
+            object: nil
+        )
+    }
+
+    @objc private func handlePinChanged(_ note: Notification) {
+        let pinned = (note.userInfo?["pinned"] as? Bool) ?? true
+        window.level = pinned ? HermesWindowLevel.chat : .normal
     }
 
     // MARK: - Public

@@ -14,7 +14,7 @@ struct PermissionCardView: View {
     @State private var hoveredButton: PermissionDecision?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             header
             toolDescription
             if let diff = request.diffPreview {
@@ -22,13 +22,12 @@ struct PermissionCardView: View {
             } else if let primary = request.primaryArg {
                 singleArgPreview(primary)
             }
-            // 固定 12pt 间距而不是 Spacer —— 避免没参数时按钮被推到底部留大空白
-            Spacer().frame(height: 8)
+            Spacer(minLength: 6)
             buttons
         }
         .padding(.horizontal, 12)
-        .padding(.top, 14)
-        .padding(.bottom, 12)
+        .padding(.top, 10)
+        .padding(.bottom, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
     }
 
@@ -36,35 +35,38 @@ struct PermissionCardView: View {
     private var header: some View {
         HStack(spacing: 5) {
             Circle()
-                .fill(Color.orange)
+                .fill(Color(NSColor.systemOrange))
                 .frame(width: 5, height: 5)
             Text("Permission Request")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(Color.orange)
+                .foregroundStyle(Color(NSColor.systemOrange))
             Spacer()
         }
     }
 
-    // MARK: - 工具描述：⚠️ Edit
-    /// 窄宽度下分两行排：第一行 ⚠️ + 工具名，第二行单独显示参数（如文件路径）
+    // MARK: - 工具描述：⚠️ 工具名
+    /// 第一行 ⚠️ + 工具名（SF Pro Display Bold 17pt）。
+    /// **第二行 primary arg 只在 Diff 模式显示** —— 让用户知道改的是哪个文件；
+    /// 非 Diff 模式（WebFetch / Bash 等）由 singleArgPreview 承担主信息载体，避免重复
     private var toolDescription: some View {
         VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 5) {
+            HStack(spacing: 6) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 12))
-                    .foregroundStyle(Color.orange)
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color(NSColor.systemOrange))
                 Text(request.toolDisplayName)
-                    .font(.system(size: 15, weight: .bold, design: .monospaced))
+                    .font(.system(size: 17, weight: .bold))
                     .foregroundStyle(.primary)
                 Spacer()
             }
-            if let arg = request.primaryArg {
+            // 仅 Diff 模式显示文件路径 —— 让 +- 行有上下文
+            if request.diffPreview != nil, let arg = request.primaryArg {
                 Text(arg)
                     .font(.system(size: 11, weight: .regular, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .padding(.leading, 17)   // 跟工具名左对齐（避开 ⚠️ 图标宽度）
+                    .padding(.leading, 19)   // 跟工具名左对齐（避开 ⚠️ 图标宽度）
             }
         }
     }
@@ -143,22 +145,25 @@ struct PermissionCardView: View {
             )
     }
 
-    // MARK: - 按钮（竖排三个全宽按钮）：Allow（绿）/ Always（橙）/ Deny（红）
-    /// 顺序按"最常用 → 危险"排：Allow 顶（首选，最易点）→ Always 中（持久决策）→ Deny 底
-    /// 颜色语义：绿=安全确认，橙=持久强决策，红=拒绝
+    // MARK: - 按钮（横排，HIG 风格）：[拒绝] Spacer [总是允许] [允许]
+    /// HIG 推荐 alert 按钮**横排在底部**，主操作（允许）放最右下角符合视线扫描终点。
+    /// destructive（拒绝）放最左用 .systemGray 弱化避免抢注意力；总是允许用 .systemOrange 提示
+    /// 危险性；允许用 .systemBlue 作为主 CTA。系统色自动适配 light/dark mode + 高对比度模式
+    /// 三按钮等宽均分卡片宽度。HStack 内每个按钮 .frame(maxWidth: .infinity) 撑满分到的列宽，
+    /// shortcut chip 用 fixedSize 不被压缩，主 label lineLimit(1) + minimumScaleFactor 兜底
     private var buttons: some View {
-        VStack(spacing: 7) {
-            decisionButton(.once, label: "Allow", shortcut: "⌘Y",
-                           tint: Color(red: 0.25, green: 0.72, blue: 0.38))   // 绿
-            decisionButton(.always, label: "Always Allow", shortcut: "",
-                           tint: Color(red: 0.95, green: 0.55, blue: 0.16))   // 橙
+        HStack(spacing: 6) {
             decisionButton(.reject, label: "Deny", shortcut: "⌘N",
-                           tint: Color(red: 0.86, green: 0.27, blue: 0.27))   // 红
+                           tint: Color(NSColor.systemGray))
+            decisionButton(.always, label: "Always", shortcut: "",
+                           tint: Color(NSColor.systemOrange))
+            decisionButton(.once, label: "Allow", shortcut: "⌘Y",
+                           tint: Color(NSColor.systemBlue))
         }
     }
 
-    /// 全宽按钮：居中 label，右侧 shortcut chip。
-    /// 用 ZStack + frame(maxWidth: .infinity) **强制 3 个按钮等宽**（无 shortcut 的不再缩水）
+    /// 等宽按钮（.frame(maxWidth: .infinity) 让 HStack 三按钮分到相同宽度）。
+    /// label 用 lineLimit(1) + minimumScaleFactor 防止"Deny"被压成"D/e/n/y"竖排字符
     private func decisionButton(_ decision: PermissionDecision,
                                  label: String,
                                  shortcut: String,
@@ -166,30 +171,33 @@ struct PermissionCardView: View {
         Button {
             onDecision(decision)
         } label: {
-            ZStack {
+            HStack(spacing: 4) {
                 Text(label)
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(.system(size: 13, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.85)
                 if !shortcut.isEmpty {
-                    HStack {
-                        Spacer()
-                        Text(shortcut)
-                            .font(.system(size: 10, weight: .regular, design: .monospaced))
-                            .foregroundStyle(Color.white.opacity(0.7))
-                    }
+                    Text(shortcut)
+                        .font(.system(size: 9, weight: .regular, design: .monospaced))
+                        .foregroundStyle(Color.white.opacity(0.7))
+                        .fixedSize()
                 }
             }
             .foregroundStyle(.white)
-            .frame(maxWidth: .infinity)   // ← 关键：强制按钮宽度撑满 VStack
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
             .background(
-                RoundedRectangle(cornerRadius: 7)
+                RoundedRectangle(cornerRadius: 8)
                     .fill(tint.opacity(hoveredButton == decision ? 1.0 : 0.88))
             )
+            .scaleEffect(hoveredButton == decision ? 1.02 : 1.0)
         }
         .buttonStyle(.plain)
         .onHover { hovering in
-            hoveredButton = hovering ? decision : nil
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.85)) {
+                hoveredButton = hovering ? decision : nil
+            }
         }
     }
 }

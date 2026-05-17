@@ -20,17 +20,36 @@ final class PermissionWindowController {
     private let window: NSWindow
     private let hosting: NSHostingView<PermissionWindowRoot>
 
-    /// 卡片宽度 = **动态**跟随灵动岛 NSWindow 宽度（notchWidth + idleExtraWidth）。
-    /// HermesPetGeometry 通知更新这两个字段后 positionUnderIsland 重算 cardWidth。
-    /// 默认值是 14" MacBook Pro 的典型值，HermesPetGeometry 通知一到立即被覆盖。
+    /// 卡片宽度 = 灵动岛真实 NSWindow 宽度（actualNotchWidth + idleExtraWidth=80）。
+    /// 跟灵动岛 NSWindow 完全等宽 —— 卡片左右沿严格对齐灵动岛左右沿，无凸出。
     ///
-    /// **+8pt 视觉补偿**：NotchShape path 边缘 antialias 让灵动岛视觉宽度比 NSWindow.width
-    /// 多 ~4-6pt，卡片用纯 RoundedRectangle 没这个边缘 → 严格等 NSWindow 宽会看起来卡片窄一点。
-    /// 加 8pt 两侧各 4pt 补偿 antialias 视觉差
-    private var dynamicNotchWidth: CGFloat = 200
-    private var dynamicIdleExtra: CGFloat = 80
-    private var cardWidth: CGFloat { dynamicNotchWidth + dynamicIdleExtra + 10 }
-    private let cardHeight: CGFloat = 260
+    /// **为什么改成 computed + 直接读屏幕**（2026-05-17 修 v1.2.4 bug + 用户截图反馈）：
+    /// 老版本用 dynamicNotchWidth/dynamicIdleExtra 字段 + HermesPetGeometry 通知更新，但
+    /// `DynamicIslandController.init` 在 `PermissionWindowController.init` 之前完成 → 通知早就发完了，
+    /// PermissionWindow 注册监听器时**永远错过 first emission** → dynamicNotchWidth 永远是 default 200
+    /// → 卡片用 290 宽。如果机型实际 actualNotchWidth=200，卡片 290 = 200+80+10 比灵动岛 NSWindow 280
+    /// 多 10pt（每侧多 5pt），加上 NotchShape 视觉收缩（耳朵渐变到透明）→ 视觉上看着卡片每侧凸出 24pt
+    /// 左右。用户在截图标"-24pt"要把这个凸出消掉。
+    /// 现在 computed 每次访问从 NSScreen 实时算 + 严格等于 NSWindow 宽度（不加 +10 视觉补偿）
+    private var cardWidth: CGFloat {
+        let screen = NSScreen.screens.first(where: { $0.safeAreaInsets.top > 0 }) ?? NSScreen.main
+        let actualNotchWidth: CGFloat = {
+            guard let screen = screen,
+                  let left = screen.auxiliaryTopLeftArea,
+                  let right = screen.auxiliaryTopRightArea else {
+                return 200   // 兜底：14" MacBook Pro 默认
+            }
+            return right.minX - left.maxX
+        }()
+        let idleExtraWidth: CGFloat = 80
+        return actualNotchWidth + idleExtraWidth
+    }
+    /// 卡片高度。动态根据 PermissionRequest 类型预设：
+    /// - Diff (Edit/Write): 290pt（5 行 new + 3 行 old + 统计 + 按钮区）
+    /// - 单参数 (WebFetch/Bash/Read): 200pt（简单 case 不浪费垂直空间）
+    /// - QuestionRequest: 270pt（多 question + 多 option）
+    /// 默认 220pt
+    private var cardHeight: CGFloat = 220
 
     /// SwiftUI 那边的可观察状态 holder（通过 NotificationCenter 同步）
     private let viewState = PermissionViewState()
@@ -66,29 +85,15 @@ final class PermissionWindowController {
 
         positionUnderIsland()
 
-        // 监听灵动岛 geometry 变化（屏幕切换 / 缩放 / 不同机型刘海宽度）
-        // 拿到真实 notchWidth + idleExtraWidth → cardWidth 跟随重算 + 重新定位
-        //
-        // NotificationCenter block observer 闭包签名是 @Sendable，Swift 6 不能假设
-        // queue:.main 等于 MainActor。但实际确实跑在 main thread，所以用
-        // MainActor.assumeIsolated 桥过去 —— 比 Task @MainActor 更快（不开新任务）
-        // 监听灵动岛 geometry 变化（屏幕切换 / 缩放 / 不同机型刘海宽度）
-        // 拿到真实 notchWidth + idleExtraWidth → cardWidth 跟随重算 + 重新定位
-        //
-        // NotificationCenter block observer 闭包是 @Sendable，note 本身不是 Sendable。
-        // 所以先在外层把 Sendable 字段拎出来（CGFloat / String / 自定义 Sendable struct），
-        // 再用 MainActor.assumeIsolated 桥到 main actor 上调实例方法。
+        // 监听灵动岛 geometry 变化（屏幕切换 / 缩放 / 不同机型刘海宽度）→ 重新定位。
+        // cardWidth 现在是 computed 从 NSScreen 实时读，不再需要监听字段更新 —— 但
+        // 屏幕几何变化（外接屏切换等）时还是要重新调 positionUnderIsland 重摆位
         NotificationCenter.default.addObserver(
             forName: .init("HermesPetGeometry"),
             object: nil, queue: .main
-        ) { [weak self] note in
-            let w = note.userInfo?["notchWidth"] as? CGFloat
-            let e = note.userInfo?["idleExtraWidth"] as? CGFloat
+        ) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self = self else { return }
-                if let w = w { self.dynamicNotchWidth = w }
-                if let e = e { self.dynamicIdleExtra = e }
-                self.positionUnderIsland()
+                self?.positionUnderIsland()
             }
         }
 
@@ -154,6 +159,8 @@ final class PermissionWindowController {
     }
 
     private func show(question: QuestionRequest) {
+        cardHeight = 230   // Question 高度档位（多 question 可见 + 按钮）
+        positionUnderIsland()
         window.orderFront(nil)
         window.alphaValue = 1
         withAnimation(.spring(response: 0.7, dampingFraction: 0.86, blendDuration: 0.3)) {
@@ -189,15 +196,13 @@ final class PermissionWindowController {
         // 卡片顶部 = 菜单栏底部，跟灵动岛底部直角形态完美衔接成一体（无缝过渡）
         let cardTopY = screenFrame.maxY - notchHeight
 
-        // **左侧 -1pt 偏移**（用户视觉对齐微调，从 -2pt 调到 -1pt）：
-        // 左边沿往右缩 1pt，右边沿保持原位
-        let leftShrink: CGFloat = 1
-        let adjustedWidth = cardWidth - leftShrink
-        let x = notchCenterX - adjustedWidth / 2 + leftShrink / 2
+        // 卡片左右沿严格对齐灵动岛 NSWindow（已删除 v1.2.4 的 leftShrink=1 偏移
+        // —— 用户截图反馈"左侧再 +1pt 就好了"，等价于把 leftShrink 消掉让左沿往左凸 1pt）
+        let x = notchCenterX - cardWidth / 2
         let y = cardTopY - cardHeight
 
         window.setFrame(
-            NSRect(x: x, y: y, width: adjustedWidth, height: cardHeight),
+            NSRect(x: x, y: y, width: cardWidth, height: cardHeight),
             display: false
         )
     }
@@ -205,6 +210,9 @@ final class PermissionWindowController {
     // MARK: - 显示 / 隐藏
 
     private func show(request: PermissionRequest) {
+        // 动态卡片高度：Diff 模式需要更多垂直空间显示 +- 行；单参数 case（WebFetch/Bash）简短紧凑
+        cardHeight = request.diffPreview != nil ? 250 : 150
+        positionUnderIsland()
         window.orderFront(nil)
         window.alphaValue = 1
         // 入场：柔和 spring 慢节奏，高 damping 不弹跳，给"灵动岛缓缓变形"的高级感
@@ -271,31 +279,17 @@ struct PermissionWindowRoot: View {
     }
 
     private func permissionCard(_ req: PermissionRequest) -> some View {
-        ZStack {
-            // 卡片背景：顶部直角 + 底部 22pt 圆角，跟灵动岛底部无缝衔接
-            UnevenRoundedRectangle(
-                cornerRadii: .init(
-                    topLeading: 0,
-                    bottomLeading: 22,
-                    bottomTrailing: 22,
-                    topTrailing: 0
-                ),
-                style: .continuous
-            )
-            .fill(Color.black)
-            .overlay(
-                UnevenRoundedRectangle(
-                    cornerRadii: .init(
-                        topLeading: 0,
-                        bottomLeading: 22,
-                        bottomTrailing: 22,
-                        topTrailing: 0
-                    ),
-                    style: .continuous
-                )
-                .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
-            )
-            .shadow(color: Color.black.opacity(0.5), radius: 14, x: 0, y: 6)
+        let shape = UnevenRoundedRectangle(
+            cornerRadii: .init(topLeading: 0, bottomLeading: 22, bottomTrailing: 22, topTrailing: 0),
+            style: .continuous
+        )
+        return ZStack {
+            // macOS 26 Liquid Glass 风格：深色半透明材质（壁纸隐约透过），保留 .65 opacity 黑底
+            // 兜底保证文字对比度。.ultraThinMaterial 让卡片"飘"在桌面上而不是纯黑色块压感
+            shape
+                .fill(Color.black)
+                .overlay(shape.stroke(Color.white.opacity(0.08), lineWidth: 0.5))
+                .shadow(color: Color.black.opacity(0.4), radius: 18, x: 0, y: 8)
 
             PermissionCardView(request: req) { decision in
                 NotificationCenter.default.post(
@@ -310,22 +304,17 @@ struct PermissionWindowRoot: View {
         .transition(cardTransition)
     }
 
-    /// AI 主动问问题卡片 —— 复用同一套黑色背景 + transition，内部换 QuestionCardView
+    /// AI 主动问问题卡片 —— 复用同一套 Liquid Glass material 背景 + transition，内部换 QuestionCardView
     private func questionCard(_ req: QuestionRequest) -> some View {
-        ZStack {
-            UnevenRoundedRectangle(
-                cornerRadii: .init(topLeading: 0, bottomLeading: 22, bottomTrailing: 22, topTrailing: 0),
-                style: .continuous
-            )
-            .fill(Color.black)
-            .overlay(
-                UnevenRoundedRectangle(
-                    cornerRadii: .init(topLeading: 0, bottomLeading: 22, bottomTrailing: 22, topTrailing: 0),
-                    style: .continuous
-                )
-                .stroke(Color.white.opacity(0.06), lineWidth: 0.5)
-            )
-            .shadow(color: Color.black.opacity(0.5), radius: 14, x: 0, y: 6)
+        let shape = UnevenRoundedRectangle(
+            cornerRadii: .init(topLeading: 0, bottomLeading: 22, bottomTrailing: 22, topTrailing: 0),
+            style: .continuous
+        )
+        return ZStack {
+            shape
+                .fill(Color.black)
+                .overlay(shape.stroke(Color.white.opacity(0.08), lineWidth: 0.5))
+                .shadow(color: Color.black.opacity(0.4), radius: 18, x: 0, y: 8)
 
             QuestionCardView(
                 request: req,

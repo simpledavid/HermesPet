@@ -614,14 +614,37 @@ struct SendOnEnterTextEditor: NSViewRepresentable {
         textView.isAutomaticSpellingCorrectionEnabled = false
         textView.isContinuousSpellCheckingEnabled = false
         textView.allowsUndo = true
+        // 进入 view tree 后主动抢 firstResponder。ChatWindowController.show() 同步调 makeFirstResponder
+        // 时 NSHostingController 还没 mount 完 SwiftUI 子树 → NSTextView 不存在 → 设不上 → 0.34s 入场动画
+        // 期间用户打的第一键无人响应被系统吞掉。这里在 NSTextView 真正进入 view hierarchy 后兜底。
+        // 多个延迟兜底：window 可能在 makeNSView 时还没设上，第一次抢可能失败
+        for delay in [0.0, 0.05, 0.15] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak textView] in
+                guard let tv = textView, let window = tv.window else { return }
+                // 已经是 firstResponder 就不动（避免抢走用户主动点击的其他控件焦点）
+                if window.firstResponder !== tv {
+                    window.makeFirstResponder(tv)
+                }
+            }
+        }
         return scrollView
     }
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let textView = nsView.documentView as? PasteAwareTextView else { return }
-        if textView.string != text {
+        // 经典 race：用户按 'h' → NSTextView 显示 'h' → textDidChange 把 parent.text 设成 'h'，
+        // 但是 SwiftUI 可能在收到这次 set 之前已经排队了一次 view update 带着 text="" 旧值进来。
+        // 朴素地写 `if textView.string != text { textView.string = text }` 会在这种 update 里
+        // 把 NSTextView 里用户刚输入的字符覆盖回空 → 用户看到"字符闪一下又没了 第一个键被吃"。
+        //
+        // 修复：用 coordinator 记录"上一次 NSTextView ↔ SwiftUI 同步过的值"。如果 SwiftUI 端
+        // 的 text 等于 lastSyncedText（说明 SwiftUI 还在 echo 我们之前的更新，不是真的外部 set），
+        // 就不要反向覆盖 NSTextView，让 textDidChange 那次 SwiftUI binding 写最终生效
+        let coordinator = context.coordinator
+        if textView.string != text && text != coordinator.lastSyncedText {
+            // SwiftUI 端 text 是"真的"外部 set（点快捷卡片 / sendMessage 清空 / retry 等），同步给 NSTextView
             textView.string = text
-            // 文本被外部 set（比如点了快捷启动卡片），重算高度
+            coordinator.lastSyncedText = text
             recomputeIdealHeight(textView)
         }
         textView.onPasteImage = onPasteImage
@@ -647,6 +670,10 @@ struct SendOnEnterTextEditor: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         let parent: SendOnEnterTextEditor
+        /// 上次 NSTextView ↔ SwiftUI 同步过的 text 值。updateNSView 用它区分
+        /// "SwiftUI 在 echo 我们的更新"（lastSyncedText == text）跟"真的外部 set"（!=），
+        /// 避免在 race 期间把用户刚输入的字符覆盖回空（详见 updateNSView 注释）
+        var lastSyncedText: String = ""
 
         init(parent: SendOnEnterTextEditor) {
             self.parent = parent
@@ -667,7 +694,11 @@ struct SendOnEnterTextEditor: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
-            parent.text = textView.string
+            let newText = textView.string
+            // 先记下"NSTextView 当前是这个值"，然后再写 SwiftUI binding —— 这样 updateNSView 即便
+            // 因为 race 拿着旧 text 进来，也能识别出 SwiftUI 是在 echo（而非外部 set），跳过覆盖
+            lastSyncedText = newText
+            parent.text = newText
             // 同步算理想高度，回传给 SwiftUI → 输入框自动跟着内容长高
             parent.recomputeIdealHeight(textView)
         }

@@ -229,6 +229,11 @@ struct DynamicIslandPillView: View {
     @State private var hoverDrop: CGFloat = 14
     @State private var hoverExtraWidth: CGFloat = 4
 
+    /// NSWindow contentView 的实测尺寸 —— onContinuousHover 用它把鼠标 location 跟
+    /// IslandHitShape 几何区做命中判断。**绕开 SwiftUI .onHover 在 macOS 26 上不严格按
+    /// contentShape 触发的坑**（鼠标在 view layout frame 整 280×74pt 任意位置都触发 hover）
+    @State private var pillViewSize: CGSize = .zero
+
     /// 当前 AgentMode（驱动左耳精灵），通过 NotificationCenter 跟 ChatViewModel 同步
     @State private var currentMode: AgentMode = {
         if let raw = UserDefaults.standard.string(forKey: "agentMode"),
@@ -342,20 +347,10 @@ struct DynamicIslandPillView: View {
 
     var body: some View {
         pillBodyWithStateObservers
-            .onHover { hovering in
-            // permission 卡片显示中：灵动岛冻结不响应 hover（permissionActive 已经把 isExpanded
-            // 强制为 true，这里直接 ignore 鼠标进出，避免一离开卡片就 hover false 缩回）
-            if permissionActive { return }
-            // **水滴动画**：width 80→4 + height 32→64 + radius 14→22 三轴同步驱动。
-            // 用 interpolatingSpring（mass=1.0, stiffness=180, damping=22）让水流感更连贯：
-            //  · stiffness 180 比标准 spring 软，水滴下流不"砸"
-            //  · damping 22 让收尾平滑无回弹
-            //  · mass 1.0 给形变一点"惯性"，模拟液体黏滞性
-            // 比之前的 spring(response:0.38, dampingFraction:0.82) 更像液体而非弹簧
-            withAnimation(.interpolatingSpring(mass: 1.0, stiffness: 180, damping: 22, initialVelocity: 0)) {
-                isHovering = hovering
-            }
-        }
+        // ⚠️ .onHover 移到 pillBody 内部跟 .contentShape 同一层（见 pillBody 末尾）。
+        // 原因：SwiftUI macOS 26 上 .onHover 不严格遵循 contentShape，会用 view layout frame
+        // 整 280×74pt NSWindow 判断 → idle 时鼠标在 NotchShape 视觉区下方的透明区也触发 hover。
+        // 把 .onHover 跟 contentShape 放同一 view 强制 SwiftUI 用 contentShape 当 hit-test 区域
         .onReceive(NotificationCenter.default.publisher(for: .init("HermesPetScreenshotAdded"))) { note in
             // 取消上次未结束的通知 task，重新计时
             notificationTask?.cancel()
@@ -626,20 +621,62 @@ struct DynamicIslandPillView: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // hover 命中区严格限制到"硬件刘海几何区"，传**死高度**而非 inset
-        // （SwiftUI 给 path(in:) 的 rect 是外层 maxFrame=windowHeight 64pt，
-        //  之前用 inset 算出 56pt 命中区，鼠标贴近菜单栏就会误触发 —— 已修正）
-        // idle:  hitHeight = notchHeight - 4 = 24pt（命中区严格在刘海可见 28pt 内，
-        //        还要鼠标深入 4pt 才触发，杜绝菜单栏下沿误触）
-        //        horizontalInset = idleExtraWidth/2 = 40pt（两侧耳朵延伸区不响应）
-        // hover: hitHeight = windowHeight 64pt（覆盖完整水滴），horizontalInset = 0
-        //        —— 鼠标在扩展区停留不会立刻丢 hover
+        // hover 命中区严格贴住"实际渲染的形态"，否则鼠标在视觉上离开水滴后仍保持 hover 状态。
+        // SwiftUI 给 path(in:) 的 rect 是外层 maxFrame = NSWindow 整个尺寸（典型 280×74pt），
+        // 之前 hover 用 horizontalInset=0 → 整个 NSWindow 280pt 横向 + 68pt 纵向都 hit
+        // → 鼠标在水滴正下方"延伸矩形区"（视觉上空白处）也保持 hover。
+        //
+        // idle:  hitHeight = notchHeight - 4 = ~28pt（严格在刘海可见区内，鼠标深入 4pt 才触发）
+        //        horizontalInset = idleExtraWidth/2（两侧耳朵延伸区不响应，严格贴刘海正下方）
+        // hover: hitHeight = notchHeight + hoverDrop（覆盖完整水滴高度）
+        //        horizontalInset = (idleExtraWidth - hoverExtraWidth)/2 - 8pt buffer
+        //        （横向贴水滴本身宽度 + 每侧 8pt 防抖 buffer，鼠标稍微出水滴边缘不立刻丢 hover）
         .contentShape(
             IslandHitShape(
                 hitHeight: isExpanded ? (notchHeight + hoverDrop) : max(0, notchHeight - 4),
-                horizontalInset: isExpanded ? 0 : idleExtraWidth / 2
+                horizontalInset: isExpanded
+                    ? max(0, (idleExtraWidth - hoverExtraWidth) / 2 - 8)
+                    : idleExtraWidth / 2
             )
         )
+        // GeometryReader 在 .background 暴露 view 实测 size 给 onContinuousHover 自检 hit area
+        .background(
+            GeometryReader { geo in
+                Color.clear
+                    .onAppear { pillViewSize = geo.size }
+                    .onChange(of: geo.size) { _, new in pillViewSize = new }
+            }
+        )
+        // ⚠️ 用 .onContinuousHover 而非 .onHover —— SwiftUI macOS 26 上 .onHover 不严格按
+        // contentShape 触发，会用 view layout frame 整 280×74pt NSWindow 判断 → 鼠标在
+        // NotchShape 视觉区下方的透明区也误触发 hover。这里 .active(location) 给的鼠标 location
+        // 是 NSWindow contentView local 坐标，我们自己跟 IslandHitShape 几何区做命中判断
+        .onContinuousHover(coordinateSpace: .local) { phase in
+            // permission 卡片显示中：灵动岛冻结不响应 hover（permissionActive 已经把 isExpanded
+            // 强制为 true，这里直接 ignore 鼠标进出，避免一离开卡片就 hover false 缩回）
+            if permissionActive { return }
+            let target: Bool
+            switch phase {
+            case .active(let location):
+                let hitHeight = isExpanded ? (notchHeight + hoverDrop) : max(0, notchHeight - 4)
+                let inset = isExpanded
+                    ? max(0, (idleExtraWidth - hoverExtraWidth) / 2 - 8)
+                    : idleExtraWidth / 2
+                let hitW = max(0, pillViewSize.width - inset * 2)
+                let hitRect = CGRect(x: inset, y: 0, width: hitW, height: hitHeight)
+                target = hitRect.contains(location)
+            case .ended:
+                target = false
+            }
+            if isHovering != target {
+                // **水滴动画**：width 80→4 + height 32→64 + radius 14→22 三轴同步驱动。
+                // interpolatingSpring 让水流感更连贯（mass=1.0 给形变惯性 / stiffness 180 比标准
+                // spring 软不"砸" / damping 22 收尾无回弹）
+                withAnimation(.interpolatingSpring(mass: 1.0, stiffness: 180, damping: 22, initialVelocity: 0)) {
+                    isHovering = target
+                }
+            }
+        }
     }
 
     /// h) 截屏快门白光叠层
